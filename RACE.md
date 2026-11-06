@@ -71,8 +71,55 @@ that is parked gets the later id even though it entered `book` first.
 
 ### Your race test
 
-**How you aimed `PausingStore`, and the result.** (Filled in after the runs; see
-below.)
+**How you aimed `PausingStore`, and the result.**
+
+Aim: `new PausingStore(real, "hasOverlap", 1)`, driven by
+`RaceTest.twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed`.
+
+Why that pair pins the predicted schedule. `PausingStore` delegates first and
+parks *after* the wrapped call has computed its answer, so `hasOverlap` call 1
+freezes customer-1 at the exact point in the prediction's t1: the store has
+already said "no overlap", the lock is released, and `book` has not yet reached
+line 74 to `insert`. While customer-1 is parked, customer-2 runs `book` end to
+end; its `hasOverlap` is call 2, which the one-shot gate ignores, and it sees an
+empty room because customer-1 inserted nothing (t2, t3). Releasing the gate
+hands customer-1 its stale `false` and it inserts too (t4). The other aims do
+not pin this schedule: `insert` 1 would park customer-1 after its booking is
+already stored, so customer-2 would be correctly rejected, and `hasOverlap` 2
+would park whichever thread checks second, after the first one may already have
+inserted. The assertion counts CONFIRMED bookings overlapping [900, 960) in the
+real store and expects 1, so it is about the end state, not the schedule.
+
+Result: the test fails on every run. The prediction matched, including the id
+order (customer-2 got `bk-1`, the parked customer-1 got `bk-2`) and the two
+`booking.confirmed` lines 1 ms apart with no `booking.rejected` between them,
+the same shape as the ticket's log excerpt.
+
+Run 1 (`mvn -B test -Dtest=RaceTest`):
+
+```
+2026-11-06T03:57:19.878Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+2026-11-06T03:57:19.879Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=900 end=960
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.026 s <<< FAILURE! -- in edu.cmu.cs214.lab10.harness.RaceTest
+[ERROR] edu.cmu.cs214.lab10.harness.RaceTest.twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed -- Time elapsed: 0.018 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: CONFIRMED bookings for WEH-5409 [900, 960) (customer-1=CONFIRMED, customer-2=CONFIRMED, gate parked a thread=true, store=[Booking[id=bk-1, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED], Booking[id=bk-2, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED]]) ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed(RaceTest.java:77)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+```
+
+Run 2 (`mvn -B test -Dtest=RaceTest`):
+
+```
+2026-11-06T03:57:20.992Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+2026-11-06T03:57:20.993Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=900 end=960
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.028 s <<< FAILURE! -- in edu.cmu.cs214.lab10.harness.RaceTest
+[ERROR] edu.cmu.cs214.lab10.harness.RaceTest.twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed -- Time elapsed: 0.019 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: CONFIRMED bookings for WEH-5409 [900, 960) (customer-1=CONFIRMED, customer-2=CONFIRMED, gate parked a thread=true, store=[Booking[id=bk-1, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED], Booking[id=bk-2, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED]]) ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed(RaceTest.java:77)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+```
 
 ---
 

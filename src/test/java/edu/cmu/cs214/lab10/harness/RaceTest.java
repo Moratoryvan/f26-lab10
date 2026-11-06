@@ -1,12 +1,101 @@
 package edu.cmu.cs214.lab10.harness;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import edu.cmu.cs214.lab10.domain.Booking;
+import edu.cmu.cs214.lab10.domain.BookingResult;
+import edu.cmu.cs214.lab10.domain.BookingStatus;
+import edu.cmu.cs214.lab10.domain.Room;
+import edu.cmu.cs214.lab10.service.BookingService;
+import edu.cmu.cs214.lab10.store.InMemoryBookingStore;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+
 /**
- * Where your concurrency tests go.
+ * Concurrency tests for the booking path, driven through {@link PausingStore}.
  *
- * <p>Empty on purpose. The wiring you need is written out below; what to aim it
- * at, and what scenario to drive through it, is yours to work out.
+ * <p>The wiring pattern this follows is written out in the comments at the
+ * bottom of the class.
  */
 class RaceTest {
+
+    private static final String WEAN = "WEH-5409";
+    private static final String GATES = "GHC-4301";
+    private static final List<Room> ROOMS = List.of(
+            new Room(WEAN, "Wean 5409", 12),
+            new Room(GATES, "Gates 4301", 30));
+
+    /** The 15:00 slot from the 2026-10-21 incident in RES-4471. */
+    private static final int START = 900;
+    private static final int END = 960;
+
+    /**
+     * RES-4471: two customers book the same room and slot at once, and both
+     * get CONFIRMED.
+     *
+     * <p>Aim: {@code hasOverlap}, call 1. customer-1 enters {@code book}, the
+     * store answers "no overlap" for an empty room, and the gate parks
+     * customer-1 holding that answer, before {@code book} reaches
+     * {@code insert}. customer-2 then runs the whole path: its
+     * {@code hasOverlap} is call 2, passes straight through, also sees no
+     * overlap, and inserts a CONFIRMED booking. Releasing the gate lets
+     * customer-1 act on its stale answer and insert a second CONFIRMED booking
+     * for the same minutes.
+     *
+     * <p>The assertion is on the end state of the real store, not on the order
+     * things happened in: the room must end up with exactly one CONFIRMED
+     * booking covering the slot.
+     */
+    @Test
+    void twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        PausingStore gated = new PausingStore(real, "hasOverlap", 1);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        AtomicReference<BookingResult> firstResult = new AtomicReference<>();
+        AtomicReference<BookingResult> secondResult = new AtomicReference<>();
+
+        // customer-1 goes first and is parked inside hasOverlap (call 1), with
+        // the store's answer already computed but not yet handed back to book().
+        Thread first = new Thread(() -> firstResult.set(service.book(WEAN, START, END)), "customer-1");
+        first.start();
+        boolean parked = gated.awaitPaused();
+
+        // customer-2 books the same slot while customer-1 is frozen in the gap
+        // between its check and its insert. Its hasOverlap is call 2 and is not
+        // gated, so it runs to completion on its own.
+        Thread second = new Thread(() -> secondResult.set(service.book(WEAN, START, END)), "customer-2");
+        second.start();
+        second.join(PausingStore.TIMEOUT_MILLIS);
+
+        // Let customer-1 return from hasOverlap and finish book().
+        gated.release();
+        first.join(PausingStore.TIMEOUT_MILLIS);
+
+        int confirmed = confirmedCount(real, WEAN, START, END);
+        assertEquals(1, confirmed,
+                "CONFIRMED bookings for " + WEAN + " [" + START + ", " + END + ")"
+                        + " (customer-1=" + outcome(firstResult)
+                        + ", customer-2=" + outcome(secondResult)
+                        + ", gate parked a thread=" + parked
+                        + ", store=" + real.bookingsForRoom(WEAN) + ")");
+    }
+
+    private static int confirmedCount(InMemoryBookingStore store, String roomId, int startMinute, int endMinute) {
+        int count = 0;
+        for (Booking booking : store.bookingsForRoom(roomId)) {
+            if (booking.status() == BookingStatus.CONFIRMED && booking.overlaps(startMinute, endMinute)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static String outcome(AtomicReference<BookingResult> result) {
+        BookingResult value = result.get();
+        return value == null ? "no result" : value.outcome().toString();
+    }
 
     // ------------------------------------------------------------------
     // Wiring example 1: wrap the store
