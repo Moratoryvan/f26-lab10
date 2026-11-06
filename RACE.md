@@ -125,13 +125,93 @@ org.opentest4j.AssertionFailedError: CONFIRMED bookings for WEH-5409 [900, 960) 
 
 ## Milestone 2: the patch a teammate sent
 
-**Your milestone-1 test on the patched code.** Green or red. Paste the result.
+The patch adds one hunk to `BookingService.book`: a second
+`store.hasOverlap(...)` immediately before `store.insert(booking)`, with the
+comment "with the freshest possible answer in hand there is no window left."
+Applied with `git apply proposed-fix.diff`; `git diff --stat` showed only
+`BookingService.java` changed (7 insertions).
 
-**The re-aimed run.** Method name, call index, the pasted result, and one line
-on why that aim tests the patch rather than sidestepping it.
+**Your milestone-1 test on the patched code.** Green. With the gate still aimed
+at `hasOverlap` call 1, customer-1 parks after its first check; customer-2 runs
+both of its checks (calls 2 and 3) and inserts; on release customer-1's new
+re-check (call 4) sees that insert and rejects. The patch defeats this one
+schedule, and that is all this green shows.
 
-**Your verdict.** Accept or reject, and what your milestone-1 result does and
-does not show about the patch.
+```
+2026-11-06T04:07:48.751Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+2026-11-06T04:07:48.752Z INFO booking.rejected room=WEH-5409 start=900 end=960 reason=slot already held
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.024 s -- in edu.cmu.cs214.lab10.harness.RaceTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+**The re-aimed run.** `new PausingStore(real, "hasOverlap", 2)`, driven by
+`RaceTest.reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot` (the
+milestone-1 test is kept alongside it). On the patched code calls 1 and 2 are
+both customer-1's: the original check, then the new re-check. Parking call 2
+freezes customer-1 with the "freshest possible answer" already computed but
+not yet acted on, in the gap the patch claims is gone. customer-2 then makes
+calls 3 and 4, sees nothing, and inserts; on release customer-1 inserts too.
+This aim tests the patch rather than sidestepping it because the thread is
+parked inside the patch's own new call, after that call has returned its
+answer: the re-check and the insert are still two store calls with the lock
+released between them, so moving the check closer to the write only shrinks
+the window. The assertion is unchanged, one CONFIRMED booking in the real store.
+Both runs fail, and the failure message records `hasOverlap calls=4`, which is
+the patched code's call count (two per customer).
+
+Run 1 (patched, `mvn -B test -Dtest='RaceTest#reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot'`):
+
+```
+2026-11-06T04:07:49.987Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=900 end=960
+2026-11-06T04:07:49.988Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.028 s <<< FAILURE! -- in edu.cmu.cs214.lab10.harness.RaceTest
+[ERROR] edu.cmu.cs214.lab10.harness.RaceTest.reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot -- Time elapsed: 0.019 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: CONFIRMED bookings for WEH-5409 [900, 960) (customer-1=CONFIRMED, customer-2=CONFIRMED, gate parked a thread=true, hasOverlap calls=4, store=[Booking[id=bk-2, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED], Booking[id=bk-1, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED]]) ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot(RaceTest.java:126)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+```
+
+Run 2 (patched, same command):
+
+```
+2026-11-06T04:07:51.106Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=900 end=960
+2026-11-06T04:07:51.107Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.027 s <<< FAILURE! -- in edu.cmu.cs214.lab10.harness.RaceTest
+[ERROR] edu.cmu.cs214.lab10.harness.RaceTest.reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot -- Time elapsed: 0.017 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: CONFIRMED bookings for WEH-5409 [900, 960) (customer-1=CONFIRMED, customer-2=CONFIRMED, gate parked a thread=true, hasOverlap calls=4, store=[Booking[id=bk-2, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED], Booking[id=bk-1, roomId=WEH-5409, startMinute=900, endMinute=960, status=CONFIRMED]]) ==> expected: <1> but was: <2>
+	at edu.cmu.cs214.lab10.harness.RaceTest.reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot(RaceTest.java:126)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+```
+
+Control: the same re-aimed test on the unpatched code is green. There call 2 is
+customer-2's only check, made after customer-1 has already inserted, so the
+gate parks customer-2 on a `true` answer and it is rejected (the 4 s elapsed
+time is the two bounded waits timing out). So the red runs above come from the
+patch's call sequence, not from a test that fails regardless.
+
+```
+2026-11-06T04:08:11.548Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+2026-11-06T04:08:15.558Z INFO booking.rejected room=WEH-5409 start=900 end=960 reason=slot already held
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.049 s -- in edu.cmu.cs214.lab10.harness.RaceTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+**Your verdict.** Reject. The patch does not close the window; it narrows it
+and moves it one call later. The invariant needs the overlap check and the
+insert to be one atomic step, and the patch still performs them as two
+separately locked store calls. The milestone-1 green on the patched code shows
+only that the patch beats the one schedule that test pins; it does not show the
+invariant holds, and the re-aimed test shows it does not. The teammate's
+evidence, "suite green, stress runner clean a few times", is the same evidence
+the ticket already discounted: the suite was green before the first report, and
+the stress runner's clean run prints "that is not evidence of anything." A
+narrower race is a worse bug, not a fixed one, because it reproduces even less
+often in the field and would re-open RES-4471 with a harder reproduction. The
+patch was undone with `git apply -R proposed-fix.diff` and is not committed.
 
 ---
 

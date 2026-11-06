@@ -82,6 +82,56 @@ class RaceTest {
                         + ", store=" + real.bookingsForRoom(WEAN) + ")");
     }
 
+    /**
+     * Milestone 2: the proposed patch adds a second {@code hasOverlap} right
+     * before {@code insert}. That re-check and the insert are still two store
+     * calls with the lock dropped between them, so the window moves; it does
+     * not close.
+     *
+     * <p>Aim: {@code hasOverlap}, call 2. On the patched code customer-1 makes
+     * call 1 (the original check) and call 2 (the new re-check), and is parked
+     * after the re-check has answered "no overlap", before {@code insert}.
+     * customer-2 then makes calls 3 and 4, both false, and inserts. Releasing
+     * the gate lets customer-1 insert on its stale re-check answer.
+     *
+     * <p>On the unpatched code call 2 belongs to customer-2's only check, which
+     * happens after customer-1 has already inserted, so this test is green
+     * there. It is aimed at the patch specifically.
+     */
+    @Test
+    void reCheckBeforeInsertStillLetsTwoCustomersConfirmTheSameSlot() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        PausingStore gated = new PausingStore(real, "hasOverlap", 2);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        AtomicReference<BookingResult> firstResult = new AtomicReference<>();
+        AtomicReference<BookingResult> secondResult = new AtomicReference<>();
+
+        // customer-1 passes its first check (call 1) and parks inside its
+        // re-check (call 2), holding a fresh "no overlap" it has not acted on.
+        Thread first = new Thread(() -> firstResult.set(service.book(WEAN, START, END)), "customer-1");
+        first.start();
+        boolean parked = gated.awaitPaused();
+
+        // customer-2 books the same slot while customer-1 sits between its
+        // re-check and its insert. Its checks are calls 3 and 4, not gated.
+        Thread second = new Thread(() -> secondResult.set(service.book(WEAN, START, END)), "customer-2");
+        second.start();
+        second.join(PausingStore.TIMEOUT_MILLIS);
+
+        gated.release();
+        first.join(PausingStore.TIMEOUT_MILLIS);
+
+        int confirmed = confirmedCount(real, WEAN, START, END);
+        assertEquals(1, confirmed,
+                "CONFIRMED bookings for " + WEAN + " [" + START + ", " + END + ")"
+                        + " (customer-1=" + outcome(firstResult)
+                        + ", customer-2=" + outcome(secondResult)
+                        + ", gate parked a thread=" + parked
+                        + ", hasOverlap calls=" + gated.targetCallCount()
+                        + ", store=" + real.bookingsForRoom(WEAN) + ")");
+    }
+
     private static int confirmedCount(InMemoryBookingStore store, String roomId, int startMinute, int endMinute) {
         int count = 0;
         for (Booking booking : store.bookingsForRoom(roomId)) {
