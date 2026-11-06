@@ -1,6 +1,7 @@
 package edu.cmu.cs214.lab10.harness;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import edu.cmu.cs214.lab10.domain.Booking;
 import edu.cmu.cs214.lab10.domain.BookingResult;
@@ -34,14 +35,20 @@ class RaceTest {
      * RES-4471: two customers book the same room and slot at once, and both
      * get CONFIRMED.
      *
-     * <p>Aim: {@code hasOverlap}, call 1. customer-1 enters {@code book}, the
-     * store answers "no overlap" for an empty room, and the gate parks
-     * customer-1 holding that answer, before {@code book} reaches
-     * {@code insert}. customer-2 then runs the whole path: its
-     * {@code hasOverlap} is call 2, passes straight through, also sees no
-     * overlap, and inserts a CONFIRMED booking. Releasing the gate lets
-     * customer-1 act on its stale answer and insert a second CONFIRMED booking
-     * for the same minutes.
+     * <p>Milestone 1 aim was {@code hasOverlap}, call 1: customer-1 entered
+     * {@code book}, the store answered "no overlap" for an empty room, and the
+     * gate parked customer-1 holding that answer before {@code insert}.
+     * customer-2 then ran the whole path, also saw no overlap, and inserted.
+     * Releasing the gate let customer-1 insert a second CONFIRMED booking.
+     *
+     * <p>Milestone 3 re-aim: the fix makes {@code book} hold a slot with the
+     * single atomic store call {@code insertIfFree}, so it never calls
+     * {@code hasOverlap} and the old aim would never fire (the test would go
+     * green after a 2 s timeout without exercising any interleaving). The gate
+     * is now aimed at {@code insertIfFree}, call 1, which is the same point in
+     * the schedule: customer-1 is parked right after the store has decided its
+     * booking, with customer-2 arriving while it is parked. The test also
+     * asserts that the gate fired, so it cannot silently go inert again.
      *
      * <p>The assertion is on the end state of the real store, not on the order
      * things happened in: the room must end up with exactly one CONFIRMED
@@ -50,29 +57,30 @@ class RaceTest {
     @Test
     void twoCustomersBookingTheSameSlotAtOnceCannotBothBeConfirmed() throws InterruptedException {
         InMemoryBookingStore real = new InMemoryBookingStore();
-        PausingStore gated = new PausingStore(real, "hasOverlap", 1);
+        PausingStore gated = new PausingStore(real, "insertIfFree", 1);
         BookingService service = new BookingService(gated, ROOMS);
 
         AtomicReference<BookingResult> firstResult = new AtomicReference<>();
         AtomicReference<BookingResult> secondResult = new AtomicReference<>();
 
-        // customer-1 goes first and is parked inside hasOverlap (call 1), with
+        // customer-1 goes first and is parked inside insertIfFree (call 1), with
         // the store's answer already computed but not yet handed back to book().
         Thread first = new Thread(() -> firstResult.set(service.book(WEAN, START, END)), "customer-1");
         first.start();
         boolean parked = gated.awaitPaused();
 
-        // customer-2 books the same slot while customer-1 is frozen in the gap
-        // between its check and its insert. Its hasOverlap is call 2 and is not
-        // gated, so it runs to completion on its own.
+        // customer-2 books the same slot while customer-1 is parked. Its
+        // insertIfFree is call 2 and is not gated, so it runs to completion.
         Thread second = new Thread(() -> secondResult.set(service.book(WEAN, START, END)), "customer-2");
         second.start();
         second.join(PausingStore.TIMEOUT_MILLIS);
 
-        // Let customer-1 return from hasOverlap and finish book().
+        // Let customer-1 return from the store and finish book().
         gated.release();
         first.join(PausingStore.TIMEOUT_MILLIS);
 
+        assertTrue(parked, "the gate never fired: book() made no insertIfFree call, so this"
+                + " test drove no interleaving (calls seen=" + gated.targetCallCount() + ")");
         int confirmed = confirmedCount(real, WEAN, START, END);
         assertEquals(1, confirmed,
                 "CONFIRMED bookings for " + WEAN + " [" + START + ", " + END + ")"

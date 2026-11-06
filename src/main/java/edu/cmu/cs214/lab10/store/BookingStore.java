@@ -29,6 +29,22 @@ public interface BookingStore {
     void insert(Booking booking);
 
     /**
+     * Stores the booking only if its room has no CONFIRMED booking touching its
+     * half-open minute range, as one indivisible step.
+     *
+     * <p>The overlap check and the insert happen under the same lock, so no
+     * other thread can insert into the room between them. This is the only
+     * way to hold a slot that keeps the one-CONFIRMED-per-minute invariant
+     * under concurrent callers; {@link #hasOverlap} followed by
+     * {@link #insert} does not, because the lock is released in between.
+     *
+     * @param booking the booking to store, normally CONFIRMED
+     * @return true when the booking was stored, false when a CONFIRMED booking
+     *     already overlapped it and nothing was stored
+     */
+    boolean insertIfFree(Booking booking);
+
+    /**
      * Every booking held for the room, in insertion order, in every status.
      *
      * @return a snapshot the caller owns; later writes to the store do not

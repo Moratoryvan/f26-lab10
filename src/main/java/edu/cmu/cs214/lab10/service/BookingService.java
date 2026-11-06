@@ -22,10 +22,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Thread safety: safe for concurrent use. The service owns no mutable
  * booking state of its own. The room catalog is built once in the constructor
  * and never written again, and every read and write of booking data goes
- * through {@link BookingStore}, whose methods are each synchronized. Since the
- * store is thread safe, the operations built on top of it are too. The only
- * other field that changes after construction is {@link BookingStats}, and its
- * numbers are documented as approximate.
+ * through {@link BookingStore}. Each store method is atomic on its own, but a
+ * sequence of store calls is not, so every invariant that spans a check and a
+ * write is enforced by a single store call: {@link #book} holds a slot with
+ * {@link BookingStore#insertIfFree} and {@link #cancelBooking} releases one
+ * with {@link BookingStore#cancelAndPromote}. The only other field that
+ * changes after construction is {@link BookingStats}, and its numbers are
+ * documented as approximate.
  */
 public final class BookingService {
 
@@ -67,11 +70,13 @@ public final class BookingService {
         if (startMinute < 0 || endMinute <= startMinute) {
             return reject(roomId, startMinute, endMinute, "empty or reversed slot");
         }
-        if (store.hasOverlap(roomId, startMinute, endMinute)) {
+        Booking booking = new Booking(nextId(), roomId, startMinute, endMinute, BookingStatus.CONFIRMED);
+        // The overlap check and the insert must be one step. Two separate store
+        // calls (hasOverlap, then insert) release the lock in between, and two
+        // callers can both pass the check before either inserts (RES-4471).
+        if (!store.insertIfFree(booking)) {
             return reject(roomId, startMinute, endMinute, "slot already held");
         }
-        Booking booking = new Booking(nextId(), roomId, startMinute, endMinute, BookingStatus.CONFIRMED);
-        store.insert(booking);
         stats.recordConfirmed();
         BookingLog.confirmed(booking);
         return BookingResult.confirmed(booking);
